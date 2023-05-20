@@ -26,6 +26,8 @@ struct field {
 int main(int argc, char *argv[]) {
     int server_sock, client_sock, client_len, read_size, i;
     struct sockaddr_in server, client;
+    memset(&client, 0, sizeof(client));
+    client_len = sizeof(client);
     char client_message[BUFFER_SIZE];
 
     if (argc < 3) {
@@ -72,8 +74,6 @@ int main(int argc, char *argv[]) {
     printf("Field generated\n");
 
     printf("Waiting for incoming connections...\n");
-    client_len = sizeof(struct sockaddr_in);
-
     while (1) {
         client_sock = accept(server_sock, (struct sockaddr *)&client, (socklen_t *)&client_len);
 
@@ -91,15 +91,35 @@ int main(int argc, char *argv[]) {
         client_sockets[client_count++] = client_sock;
         printf("Connection accepted\n");
 
+        char field_and_mortar_info[BUFFER_SIZE];
+        sprintf(field_and_mortar_info, "%d;%d", field_size, mortars_count);
+
+        // send information to each connected client
+        for (int i = 0; i < client_count; i++) {
+            write(client_sockets[i], field_and_mortar_info, strlen(field_and_mortar_info));
+        }
+
         while ((read_size = recv(client_sock, client_message, BUFFER_SIZE, 0)) > 0) {
             printf("Received coordinates: %s\n", client_message);
-
+            char *token = strtok(client_message, ";");
+            int x = -1, y = -1;
+            if (token != NULL) {
+                x = atoi(token);
+                token = strtok(NULL, ";");
+                if (token != NULL) {
+                    y = atoi(token);
+                }
+            }
             // Send the message to other clients
             for (i = 0; i < client_count; i++) {
                 if (client_sockets[i] != client_sock) {
                     write(client_sockets[i], client_message, read_size);
                 }
             }
+
+            // Send acknowledgement back to the original client
+            char ack_msg[] = "Coordinates received";
+            write(client_sock, ack_msg, strlen(ack_msg));
         }
 
         if (read_size == 0) {
