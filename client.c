@@ -5,11 +5,17 @@
 #include <arpa/inet.h>
 #include <time.h>
 
-#define SERVER "127.0.0.1"
 #define BUFFER_SIZE 1024
-#define PORT 8888
 
 int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        printf("Usage: %s <server_ip> <port>\n", argv[0]);
+        return 1;
+    }
+    
+    char *SERVER = argv[1];
+    int PORT = atoi(argv[2]);
+    
     srand(time(NULL));
     int sock;
     struct sockaddr_in server;
@@ -63,8 +69,14 @@ int main(int argc, char *argv[]) {
             printf("recv failed\n");
             return 1;
         }
-
-        printf("Server reply : %s\n", server_reply);
+        char *message_start = server_reply;
+        char *newline_position;
+        while ((newline_position = strchr(message_start, '\n')) != NULL) {
+            *newline_position = '\0';
+            printf("Server reply : %s\n", message_start);
+            message_start = newline_position + 1;
+        }
+        sleep(x + y);
     }
 
     close(sock);
