@@ -1,16 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
-#include <time.h>
-#include <pthread.h>
 
-#define MAX_CLIENTS 2
-#define BUFFER_SIZE 1024
+#define BUF_SIZE 1024
 
-int client_sockets[MAX_CLIENTS];
-int client_count = 0;
+struct client_node {
+    struct sockaddr_in clientAddr;
+    socklen_t addr_size;
+    struct client_node *next;
+};
 
 struct mortar {
     int x;
@@ -24,66 +25,11 @@ struct field {
     struct mortar *mortars_b;
 };
 
-void *client_handler(void *socket_desc) {
-    int sock = *(int *)socket_desc;
-    int read_size;
-    char client_message[BUFFER_SIZE];
-
-    // Handle client communication
-    while ((read_size = recv(sock, client_message, BUFFER_SIZE, 0)) > 0) {
-        char *token = strtok(client_message, ";");
-        int x = -1, y = -1;
-        if (token != NULL) {
-            x = atoi(token);
-            token = strtok(NULL, ";");
-            if (token != NULL) {
-                y = atoi(token);
-            }
-        }
-
-        // Send the message to the other client
-        for (int i = 0; i < client_count; i++) {
-            if (client_sockets[i] != sock) {
-                char received_shot[BUFFER_SIZE];
-                snprintf(received_shot, BUFFER_SIZE, "Shot received at: %d;%d\n", x, y);
-                write(client_sockets[i], received_shot, strlen(received_shot));
-                break;
-            }
-        }
-
-        // Send acknowledgement with the result of the shot
-        char ack_msg[BUFFER_SIZE];
-        snprintf(ack_msg, BUFFER_SIZE, "Shot fired at: %d;%d\n", x, y);
-        write(sock, ack_msg, strlen(ack_msg));
-    }
-
-    if (read_size == 0) {
-        printf("Client disconnected\n");
-        fflush(stdout);
-        // Remove the client from the client_sockets array
-        for (int i = 0; i < client_count; i++) {
-            if (client_sockets[i] == sock) {
-                client_sockets[i] = client_sockets[client_count - 1];
-                client_count--;
-                break;
-            }
-        }
-    } else if (read_size == -1) {
-        perror("recv failed\n");
-    }
-
-    close(sock);
-    free(socket_desc);
-
-    return 0;
-}
-
 int main(int argc, char *argv[]) {
-    int server_sock, client_sock, client_len, read_size, i;
-    struct sockaddr_in server, client;
-    memset(&client, 0, sizeof(client));
-    client_len = sizeof(client);
-    char client_message[BUFFER_SIZE];
+    struct sockaddr_in server_addr, client_addr;
+    int sockfd;
+    char buffer[BUF_SIZE];
+    socklen_t addr_size;
 
     if (argc < 5) {
         printf("Usage: %s <field_size> <mortars_count> <ip_address> <port>\n", argv[0]);
@@ -100,29 +46,34 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    server_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_sock == -1) {
-        printf("Could not create socket\n");
-        return 1;
+    // Creating a socket
+    sockfd = socket(PF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("Error: socket creation failed\n");
+        exit(EXIT_FAILURE);
     }
 
-    server.sin_family = AF_INET;
-    server.sin_addr.s_addr = inet_addr(ip_address);
-    server.sin_port = htons(port);
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    server_addr.sin_addr.s_addr = inet_addr(ip_address);
 
-    if (bind(server_sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
-        perror("bind failed. Error\n");
-        return 1;
+    // Bind the address struct to the socket
+    if (bind(sockfd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+        perror("Error: bind failed\n");
+        exit(EXIT_FAILURE);
     }
 
-    listen(server_sock, MAX_CLIENTS);
+    addr_size = sizeof(client_addr);
+
+    // client list head
+    struct client_node *clients = NULL;
 
     printf("Generating field...\n");
     struct field battlefield;
     battlefield.n = field_size;
     battlefield.mortars_a = malloc(mortars_count * sizeof(struct mortar));
     battlefield.mortars_b = malloc(mortars_count * sizeof(struct mortar));
-    for (i = 0; i < mortars_count; i++) {
+    for (size_t i = 0; i < mortars_count; i++) {
         battlefield.mortars_a[i].x = rand() % field_size;
         battlefield.mortars_a[i].y = rand() % field_size;
         battlefield.mortars_a[i].destroyed = 0;
@@ -132,39 +83,44 @@ int main(int argc, char *argv[]) {
     }
     printf("Field generated\n");
 
-    printf("Waiting for incoming connections...\n");
     while (1) {
-        client_sock = accept(server_sock, (struct sockaddr *)&client, (socklen_t *)&client_len);
+        int recv_len = recvfrom(sockfd, buffer, BUF_SIZE, 0, (struct sockaddr *) &client_addr, &addr_size);
+        if (recv_len > 0) {
+            buffer[recv_len] = 0;
+            int client_pid, x, y;
+            sscanf(buffer, "%d;%d;%d", &client_pid, &x, &y);
 
-        if (client_sock < 0) {
-            perror("accept failed\n");
-            continue;
+            printf("Client with pid %d shot at %d,%d\n", client_pid, x, y);
+
+            struct client_node *node = clients;
+            while (node != NULL) {
+                if (node->clientAddr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
+                    node->clientAddr.sin_port == client_addr.sin_port) {
+                    break;
+                }
+                node = node->next;
+            }
+            if (node == NULL) {
+                node = malloc(sizeof(struct client_node));
+                node->clientAddr = client_addr;
+                node->addr_size = addr_size;
+                node->next = clients;
+                clients = node;
+            }
+
+            struct client_node *tmp = clients;
+            while (tmp != NULL) {
+                sendto(sockfd, buffer, recv_len, 0, (struct sockaddr *) &(tmp->clientAddr), tmp->addr_size);
+                tmp = tmp->next;
+            }
         }
+    }
 
-        if (client_count >= MAX_CLIENTS) {
-            printf("Maximum clients connected. Connection rejected\n");
-            close(client_sock);
-            continue;
-        }
-
-        client_sockets[client_count++] = client_sock;
-        printf("Connection accepted\n");
-
-        char field_and_mortar_info[BUFFER_SIZE];
-        sprintf(field_and_mortar_info, "%d;%d", field_size, mortars_count);
-
-        // send information to the connected client
-        write(client_sock, field_and_mortar_info, strlen(field_and_mortar_info));
-
-        pthread_t thread_id;
-        int *new_sock = malloc(sizeof(int));
-        *new_sock = client_sock;
-        if (pthread_create(&thread_id, NULL, client_handler, (void *)new_sock) < 0) {
-            perror("Could not create thread\n");
-            return 1;
-        }
-
-        printf("Handler assigned\n");
+    // free client list
+    while (clients != NULL) {
+        struct client_node *tmp = clients;
+        clients = clients->next;
+        free(tmp);
     }
 
     return 0;
